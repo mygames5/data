@@ -1,45 +1,72 @@
-import csv
-import re
-from pprint import pprint
+import requests
+from bs4 import BeautifulSoup
+import json
+import time
 
-# Читаем адресную книгу в формате CSV в список contacts_list
-with open("phonebook_raw.csv", encoding="utf-8") as f:
-    rows = csv.reader(f, delimiter=",")
-    contacts_list = list(rows)
+# Параметры для поиска
+search_url = "https://hh.ru/search/vacancy"
+params = {
+    "text": "Python",
+    "area": [1, 2],  # Москва и Санкт-Петербург
+    "items_on_page": "20",
+    "page": 0,  # Начальная страница
+}
 
-# TODO 1: Привести Фамилию, Имя, Отчество к стандартному виду
-def normalize_names(contact):
-    fio = ' '.join(contact[:3]).split()  # Объединяем первые три элемента и разбиваем по пробелам
-    contact[:3] = fio + [''] * (3 - len(fio))  # Дополняем недостающими элементами (если их меньше 3)
-    return contact
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36"
+}
 
-contacts_list = [normalize_names(contact) for contact in contacts_list]
+# Функция для проверки наличия ключевых слов
+def contains_keywords(description, keywords):
+    return all(keyword.lower() in description.lower() for keyword in keywords)
 
-phone_pattern = re.compile(
-    r"(\+7|8)?\s*\(?(\d{3})\)?[\s-]?(\d{3})[\s-]?(\d{2})[\s-]?(\d{2})(\s*\(?доб\.?\s*(\d+)\)?)?"
-)
-phone_substitution = r"+7(\2)\3-\4-\5 доб.\7"
+# Сбор вакансий
+vacancies = []
+keywords = ["Django", "Flask"]
 
-for contact in contacts_list:
-    contact[5] = phone_pattern.sub(phone_substitution, contact[5]).strip(' доб.')
+while True:
+    response = requests.get(search_url, headers=headers, params=params)
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    vacancy_items = soup.find_all("div", class_="vacancy-serp-item")
+    
+    if not vacancy_items:
+        break  # Если вакансий больше нет, выходим из цикла
+    
+    for item in vacancy_items:
+        title = item.find("a", class_="serp-item__title").text
+        link = item.find("a", class_="serp-item__title")["href"]
+        company = item.find("a", class_="bloko-link bloko-link_kind-tertiary").text.strip()
+        city = item.find("div", {"data-qa": "vacancy-serp__vacancy-address"}).text.strip()
+        salary = item.find("span", {"data-qa": "vacancy-serp__vacancy-compensation"})
+        
+        if salary:
+            salary = salary.text.strip()
+        else:
+            salary = "Не указана"
+        
+        # Открываем ссылку на вакансию для получения описания
+        vacancy_response = requests.get(link, headers=headers)
+        vacancy_soup = BeautifulSoup(vacancy_response.text, "html.parser")
+        description = vacancy_soup.find("div", {"data-qa": "vacancy-description"}).text
+        
+        if contains_keywords(description, keywords):
+            # Фильтрация по зарплате в долларах (если требуется)
+            if "USD" in salary:
+                vacancies.append({
+                    "title": title,
+                    "link": link,
+                    "company": company,
+                    "city": city,
+                    "salary": salary,
+                })
+    
+    # Переход на следующую страницу
+    params["page"] += 1
+    time.sleep(1)  # Даем паузу между запросами, чтобы не перегружать сервер
 
-contacts_dict = {}
-for contact in contacts_list[1:]:  # Пропускаем заголовок
-    name_key = (contact[0], contact[1])  # Ключ: Фамилия + Имя
-    if name_key in contacts_dict:
-        old_contact = contacts_dict[name_key]
-        for i in range(len(contact)):
-            if not old_contact[i]:  # Если старое поле пустое, заменяем на новое
-                old_contact[i] = contact[i]
-    else:
-        contacts_dict[name_key] = contact
+# Запись в JSON файл
+with open("vacancies.json", "w", encoding="utf-8") as file:
+    json.dump(vacancies, file, ensure_ascii=False, indent=4)
 
-
-contacts_list = [contacts_list[0]] + list(contacts_dict.values())
-
-# Сохраняем получившиеся данные в другой файл
-with open("phonebook.csv", "w", encoding="utf-8") as f:
-    datawriter = csv.writer(f, delimiter=',')
-    datawriter.writerows(contacts_list)
-
-pprint(contacts_list)
+print(f"Собрано {len(vacancies)} вакансий.")
